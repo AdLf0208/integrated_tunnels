@@ -3,7 +3,9 @@
   "items": [
     "integratedtunnels:tunnel_cable",
     "integratedtunnels:part_importer_item",
-    "integratedtunnels:part_exporter_item"
+    "integratedtunnels:part_exporter_item",
+    "integratedtunnels:part_importer_fluid",
+    "integratedtunnels:part_exporter_fluid"
   ],
   "title": "Integrated Tunnels"
 }

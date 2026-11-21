@@ -35,7 +35,9 @@
       "values": [
         "none",
         "importer_item",
-        "exporter_item"
+        "exporter_item",
+        "importer_fluid",
+        "exporter_fluid"
       ]
     },
     "part_east": {
@@ -43,7 +45,9 @@
       "values": [
         "none",
         "importer_item",
-        "exporter_item"
+        "exporter_item",
+        "importer_fluid",
+        "exporter_fluid"
       ]
     },
     "part_north": {
@@ -51,7 +55,9 @@
       "values": [
         "none",
         "importer_item",
-        "exporter_item"
+        "exporter_item",
+        "importer_fluid",
+        "exporter_fluid"
       ]
     },
     "part_south": {
@@ -59,7 +65,9 @@
       "values": [
         "none",
         "importer_item",
-        "exporter_item"
+        "exporter_item",
+        "importer_fluid",
+        "exporter_fluid"
       ]
     },
     "part_up": {
@@ -67,7 +75,9 @@
       "values": [
         "none",
         "importer_item",
-        "exporter_item"
+        "exporter_item",
+        "importer_fluid",
+        "exporter_fluid"
       ]
     },
     "part_west": {
@@ -75,7 +85,9 @@
       "values": [
         "none",
         "importer_item",
-        "exporter_item"
+        "exporter_item",
+        "importer_fluid",
+        "exporter_fluid"
       ]
     },
     "status": {

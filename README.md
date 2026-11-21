@@ -1,68 +1,79 @@
-# Integrated Tunnels — a Horizon port
+# Integrated Tunnels → Horizon (slices 1–2)
 
-**Integrated Tunnels** is a Minecraft mod. Transfer other energy, items and fluids over Integrated Dynamics networks. This repository is a **port of it to [Horizon](https://github.com/horizon-rust/horizon)**, the Rust engine for Minecraft Java 26.3. It carries the complete source of the port plus the content files it ships, and installs as a single `.hmod` package.
+A Horizon port of **Integrated Tunnels 1.13.0** (`CyclopsMC/IntegratedTunnels`,
+**MIT**), Minecraft 1.21.1 NeoForge, from the exact ATM10 pack jar.
 
-Upstream: [CyclopsMC/IntegratedTunnels](https://github.com/CyclopsMC/IntegratedTunnels) — licence **MIT**.
+**Slice 1 is the item tunnel:** an **Item Importer** part on a tunnel cable
+face pulls items out of the inventory behind that face into the cable network's
+item store at the jar's rate (64 items per tick), an **Item Exporter** part on
+another cable face pushes them out again, and the cable's
+`/integratedtunnels info` readout shows the parts, the store and the status.
 
-| | |
-|---|---|
-| Upstream mod | Integrated Tunnels ([source](https://github.com/CyclopsMC/IntegratedTunnels)) |
-| Ported to | Horizon 0b14f8a, Minecraft Java 26.3, mod API `0.2` |
-| Package | `integratedtunnels.hmod` (install it with the Horizon launcher) |
-| Licence | **MIT** — the upstream mod's licence; see [Licence and credit](#licence-and-credit) |
+**Slice 2 is the fluid tunnel:** a **Fluid Importer** part drains the tank behind
+its face (a cauldron answers as one tank) into the network's slotless **fluid
+channel** at the jar's 1000 mB per tick, a **Fluid Exporter** fills the tank
+behind its face from that channel, and the readout grows a `fluids … mB` line.
+The two channels are independent, and a cable's status follows the parts that
+have work on their own channel.
 
-## What this port implements
+What is not here: the energy, world, interface and player-simulator parts,
+filters, the variable-card/aspect layer, part screens, network energy, item NBT
+fidelity in the store, the multipart block-entity renderer and the part recipes
+(their ingredients are Integrated Dynamics content the parent port does not
+carry). See `notes.md` for the full slice boundary, the coverage table and the
+gaps, `VALIDATION.md` for every measured number, and `FINDINGS.md` for the jar
+inventory the slices were chosen from.
 
-- **`integratedtunnels:tunnel_cable`** — a 4 px non-occluding core (hardness
-- **Parts** — `integratedtunnels:part_importer_item` and
-- **Importer** — `native_container_slots` (API 48) reads the slots the face
-- **Exporter** — `runtime::plan_export` picks the store's first stack (up to 64)
-- **Network** — the connected cable set (6-way adjacency, bounded to 1,024
-- **Cadence** — a cable's block-entity tick only **queues** it (a tick's own
-- **Harness readout** — `/integratedtunnels info <x> <y> <z>` prints the six
-- **One transaction per network per tick.** Every import/export and the store write now share the
+## The package (SDK layout, 2026-11-18)
 
-## Not yet ported
+One flat `.hmod` carries **both halves** — content and code — so a single file
+installs the carrier block, the four part items and the network behaviour:
 
-- the **variable/aspect layer**: variable cards, the aspect selection GUI, and
-- the **fluid and energy** parts and the fluid/energy network channels;
-- the **world parts** (`importer/exporter_world_item|fluid|energy|block`) and
-- the **interface** parts (item/fluid/energy and their filtering variants) and
-- **part screens**, the part-removal/drop path and the part `error` state;
-- **network energy**: `getConsumptionRate`, the energy buffer, the energy parts;
-- **cable interop**: an Integrated Tunnels part cannot sit on the sibling port's
-- **NBT fidelity** in the store (components on stored items);
-
-## Installing
-
-1. Install the [Horizon launcher](https://github.com/horizon-rust/horizon/releases) (0.2.70 or newer).
-2. Add `integratedtunnels.hmod` to the instance's mods.
-3. The package is pinned to a specific Horizon build; the launcher checks that pin.
-
-## Licence and credit
-
-Integrated Tunnels was created by its upstream authors; the code, models and assets in the original mod
-remain theirs and are used here under **MIT**. The Rust in this repository is a clean-room
-rewrite for Horizon, not a translation of the original source.
-
-- `LICENSE` — the upstream licence text.
-- `LICENSE-NOTICE.md` — what this port carries and where it came from.
-- The upstream project: https://github.com/CyclopsMC/IntegratedTunnels
-
-## Technical details
-
-```
-horizon-mod.toml   package manifest (id, version, api, [native] pin)
-Cargo.toml         the crate; depends on `horizon-mod-api` from the fetched SDK
-src/               lib.rs (the one `impl Hooks`), runtime.rs (pure logic + tests), glue
-assets/ data/      the content the package ships
-tools/             content generators and the e2e scenario
+```text
+integratedtunnels.hmod
+  horizon-mod.toml    id, version, api = "0.2", side, capabilities, [native] pins
+  Cargo.toml          one crate; the only dependency is horizon-mod-api (.horizon/sdk/)
+  src/lib.rs          the one #[mod_api::horizon_mod] impl Hooks
+  src/cable.rs        the game glue: block entity part, tick queue, network pass, commands
+  src/runtime.rs      the pure logic and its tests (item + fluid rules)
+  assets/ data/       the carrier block, the four part items, models, textures, lang, loot
+  LICENSE, LICENSE-NOTICE.md
+  uses.json           the surface the package uses (written by the build)
 ```
 
-- Build: `cargo horizon-mod build` (packages; it does not compile against the game).
-- Test: `cargo test`, `cargo clippy --all-targets -- -D warnings`.
-- In-game: `ports/tools/launcher-game.sh run integratedtunnels` in the campaign tree, or install the
-  `.hmod` and play; the harness scenario is `tools/e2e.sh`.
+The retired `.hnmod` did not go away: it is kept under
+`ports/_shared/evidence/integratedtunnels/retired-hnmod-0.1.0/`, with the old
+content manifest and the built 0.1.0 content `.hmod`.
 
-This repository is generated from the campaign's port at `ports/integratedtunnels/`; the port's own
-`notes.md` is the full record (decisions, traps, evidence).
+## Building and checking
+
+The SDK tool runs in the port; the build/test steps go through the campaign's
+slot runner and are compiled with the pinned SDK (`.horizon/sdk`, fetched by the
+first `cargo horizon-mod` command):
+
+```sh
+cd ports/integratedtunnels
+cargo test                                    # the pure runtime: 28 passed
+cargo clippy --all-targets -- -D warnings      # 0 warnings
+cargo fmt --check                              # of this crate only (never --all)
+rm -f Cargo.lock                               # see notes.md, trap 5
+cargo horizon-mod build                        # -> target/horizon-mod/integratedtunnels.hmod
+cp target/horizon-mod/integratedtunnels.hmod ./integratedtunnels.hmod
+cargo horizon-mod check integratedtunnels.hmod
+cargo horizon-mod fits integratedtunnels.hmod --build 0a875da
+cargo horizon-mod fits integratedtunnels.hmod --build 0b14f8acfd97fa2c750e42795249dcc981178ca4
+```
+
+The in-game scenario is `tools/e2e.sh`, which needs a **launcher-built** game
+(compiled against this port) because native code is compiled into the client:
+
+```sh
+ports/tools/launcher-game.sh build integratedtunnels
+eval "$(ports/tools/launcher-game.sh env integratedtunnels)"
+GAME=$GAME CTL=$CTL tools/e2e.sh
+```
+
+The jar is evidence at
+`ports/_shared/licence-cache/integratedtunnels-1.21.1-neoforge-1.13.0.jar`.
+
+**Local-only** until the maintainer approves publishing (ARCHITECTURE.md §8).

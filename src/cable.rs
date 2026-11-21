@@ -23,15 +23,16 @@ use std::sync::{Arc, Mutex};
 
 use mod_api::{
     BlockEntityPart, BlockEntityTickEvent, BlockEntityTicksEvent, BlockKey, BlockPart, Capability,
-    CommandArgumentValue, CommandInvocation, Compound, Direction, Hand, Host, HostTransaction,
-    ITEMS, Identifier, ItemPlace, ItemResource, ItemStack, LevelRef, ResourceHandler, ServerHost,
-    Tag, Text,
+    CommandArgumentValue, CommandInvocation, Compound, Direction, FLUIDS, FluidIdentity,
+    FluidResource, FluidStack, Hand, Host, HostTransaction, ITEMS, Identifier, ItemPlace,
+    ItemResource, ItemStack, LevelRef, ResourceHandler, ServerHost, Tag, Text,
 };
 
 use crate::runtime::{
-    FACE_COUNT, FACE_NAMES, ITEM_RATE, ImportMove, Part, Parts, SlotView, Store, collect_network,
-    commit_export, commit_import, describe_store, face_of_normal, opposite, plan_export,
-    plan_import, root, status_for,
+    FACE_COUNT, FACE_NAMES, FLUID_RATE, FluidImport, Fluids, ITEM_RATE, ImportMove, Part, PartSet,
+    SlotView, Store, TankView, collect_network, commit_export, commit_fluid_export,
+    commit_fluid_import, commit_import, describe_fluids, describe_store, face_of_normal, opposite,
+    plan_export, plan_fluid_export, plan_fluid_import, plan_import, root, status_for,
 };
 
 /// The tunnel cable carrier block (and its item).
@@ -40,11 +41,20 @@ pub(crate) const CABLE: &str = "integratedtunnels:tunnel_cable";
 pub(crate) const IMPORTER: &str = "integratedtunnels:part_importer_item";
 /// The Item Exporter part item.
 pub(crate) const EXPORTER: &str = "integratedtunnels:part_exporter_item";
+/// The Fluid Importer part item.
+pub(crate) const IMPORTER_FLUID: &str = "integratedtunnels:part_importer_fluid";
+/// The Fluid Exporter part item.
+pub(crate) const EXPORTER_FLUID: &str = "integratedtunnels:part_exporter_fluid";
 /// The network item store, saved in the root cable's block entity: a list of
 /// `{item, count}` compounds, in first-arrival order.
 const STORE_TAG: &str = "store";
 const ITEM_TAG: &str = "item";
 const COUNT_TAG: &str = "count";
+/// The network fluid channel, saved beside the item store: a list of
+/// `{fluid, amount}` compounds, in first-arrival order.
+const FLUIDS_TAG: &str = "fluids";
+const FLUID_TAG: &str = "fluid";
+const AMOUNT_TAG: &str = "amount";
 /// A safety cap on one network's cable count (upstream has no limit; a runaway
 /// build must not stall the level tick).
 const MAX_NETWORK: usize = 1024;
@@ -130,11 +140,11 @@ fn is_cable(host: &dyn Host, cable: BlockKey, level: LevelRef, pos: [i32; 3]) ->
 }
 
 /// The parts a cable carries, or `None` for another block.
-fn parts_at(host: &dyn Host, cable: BlockKey, level: LevelRef, pos: [i32; 3]) -> Option<Parts> {
+fn parts_at(host: &dyn Host, cable: BlockKey, level: LevelRef, pos: [i32; 3]) -> Option<PartSet> {
     if !is_cable(host, cable, level, pos) {
         return None;
     }
-    let mut parts = Parts::new();
+    let mut parts = PartSet::new();
     for face in 0..FACE_COUNT {
         let value = level.block_property(host, pos, &face_property(face))?;
         parts = parts.with(face, Part::from_name(&value)?);
@@ -171,6 +181,35 @@ fn store_at(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> Store {
     store
 }
 
+/// The network's fluid channel, as saved in the root cable's block entity.
+fn fluid_store_at(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> Fluids {
+    let Some(entity) = host.block_entity(level, pos) else {
+        return Fluids::new();
+    };
+    let Some(data) = entity.data(host) else {
+        return Fluids::new();
+    };
+    let Some(Tag::List(entries)) = data.get(&FLUIDS_TAG.into()) else {
+        return Fluids::new();
+    };
+    let mut fluids = Fluids::new();
+    for entry in entries {
+        let Some(Tag::String(fluid)) = entry.get(FLUID_TAG) else {
+            continue;
+        };
+        let Some(Tag::Int(amount)) = entry.get(AMOUNT_TAG) else {
+            continue;
+        };
+        if *amount > 0 {
+            let Ok(amount) = u32::try_from(*amount) else {
+                continue;
+            };
+            fluids.add(&fluid.to_string_lossy(), amount);
+        }
+    }
+    fluids
+}
+
 /// The store as NBT (the shape [`store_at`] reads back).
 fn store_tag(store: &Store) -> Tag {
     let entries = store
@@ -189,19 +228,44 @@ fn store_tag(store: &Store) -> Tag {
     Tag::List(entries)
 }
 
-/// Save a network's item store on its root cable, as `/data merge block` does: it
-/// loads the merged data and tells clients, and it is part of the caller's
-/// transaction.
-fn set_store(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], store: &Store) -> bool {
+/// The fluid channel as NBT (the shape [`fluid_store_at`] reads back).
+fn fluids_tag(fluids: &Fluids) -> Tag {
+    let entries = fluids
+        .entries()
+        .iter()
+        .map(|entry| {
+            Tag::compound([
+                (FLUID_TAG, Tag::String(entry.fluid.as_str().into())),
+                (
+                    AMOUNT_TAG,
+                    Tag::Int(i32::try_from(entry.amount).unwrap_or(i32::MAX)),
+                ),
+            ])
+        })
+        .collect();
+    Tag::List(entries)
+}
+
+/// Save a network's item store and fluid channel on its root cable, as
+/// `/data merge block` does: it loads the merged data and tells clients, and it
+/// is part of the caller's transaction.
+fn set_stores(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    items: &Store,
+    fluids: &Fluids,
+) -> bool {
     let Some(entity) = host.block_entity(level, pos) else {
         return false;
     };
     let mut data = Compound::new();
-    data.insert(STORE_TAG.into(), store_tag(store));
-    // A refused merge aborts the pass's transaction, so no item leaves or enters a
-    // container without the store recording it. `Ok(false)` is "no change" here:
-    // this compound's depth is 3 and every entry is a string and an int, so the
-    // other two causes it names (too deep, cannot load) cannot apply to it.
+    data.insert(STORE_TAG.into(), store_tag(items));
+    data.insert(FLUIDS_TAG.into(), fluids_tag(fluids));
+    // A refused merge aborts the pass's transaction, so nothing leaves or enters a
+    // container without the network recording it. `Ok(false)` is "no change" here:
+    // both compounds are depth 3 and every entry is a string and an int, so the
+    // other two causes it names (too deep, cannot load) cannot apply to them.
     entity.merge_data(host, data).is_ok()
 }
 
@@ -212,10 +276,11 @@ fn show_status(
     host: &mut dyn ServerHost,
     level: LevelRef,
     pos: [i32; 3],
-    parts: Parts,
+    parts: PartSet,
     store: &Store,
+    fluids: &Fluids,
 ) {
-    let status = status_for(parts, store).name();
+    let status = status_for(parts, store, fluids).name();
     if level.block_property(host, pos, "status").as_deref() != Some(status) {
         host.set_block_property(pos, "status", status);
     }
@@ -241,6 +306,22 @@ fn container(
     )
 }
 
+/// The tank behind `face`, as the engine's side-filtered fluid handler (a
+/// cauldron answers as one tank).
+fn fluid_container(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    cable: [i32; 3],
+    face: usize,
+) -> Option<Capability<dyn ResourceHandler<FluidResource>>> {
+    level.capability(
+        host,
+        &FLUIDS,
+        crate::runtime::neighbours(cable)[face],
+        Some(touching_side(face)),
+    )
+}
+
 /// One importer's move this tick: up to [`ITEM_RATE`] items from the first slot
 /// the face may take from, into the network's store.
 fn import_once(
@@ -255,9 +336,16 @@ fn import_once(
     };
     // Every slot this handler lists is one the side reaches, so it is takeable
     // through that side; the extract is what the engine has the last word on.
+    // A stack the store cannot round-trip (components or damage) is left alone:
+    // the store keeps an item id and a count, and rebuilding a fresh stack from
+    // those would lose a shulker's contents or a tool's wear.
     let views: Vec<SlotView> = (0..container.size(host))
         .filter_map(|slot| {
             let resource = container.resource(host, slot)?;
+            let stack = resource.as_stack();
+            if !round_trips(stack.components().is_some(), stack.damage()) {
+                return None;
+            }
             let count = container.amount(host, slot);
             Some(SlotView {
                 slot,
@@ -326,6 +414,95 @@ fn export_once(
     commit_export(store, &plan, inserted);
 }
 
+/// The id of a tank's fluid, or `None` for one this build cannot name.
+fn fluid_name(host: &dyn Host, resource: &FluidResource) -> Option<String> {
+    match resource.fluid() {
+        FluidIdentity::Resolved(key) => Some(key.id(host)),
+        FluidIdentity::Unresolved(fluid) => Some(fluid.id(host)),
+        // `FluidIdentity` is non-exhaustive: a future identity is not one we can store.
+        _ => None,
+    }
+}
+
+/// One fluid importer's move this tick: up to [`FLUID_RATE`] millibuckets from
+/// the first tank holding fluid on its face into the network's fluid channel.
+fn import_fluid_once(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    cable: [i32; 3],
+    face: usize,
+    fluids: &mut Fluids,
+) {
+    let Some(container) = fluid_container(host, level, cable, face) else {
+        return;
+    };
+    let tanks: Vec<TankView> = (0..container.size(host))
+        .filter_map(|tank| {
+            let resource = container.resource(host, tank)?;
+            let fluid = fluid_name(host, &resource)?;
+            Some(TankView {
+                tank,
+                fluid,
+                amount: container.amount(host, tank),
+            })
+        })
+        .collect();
+    let Some(plan) = plan_fluid_import(&tanks, FLUID_RATE) else {
+        return;
+    };
+    let Some(resource) = container.resource(host, plan.tank) else {
+        return;
+    };
+    let id = fluid_name(host, &resource).unwrap_or_else(|| plan.fluid.clone());
+    let taken = host
+        .transaction(|host, tx| {
+            Ok::<_, ()>(container.extract(host, tx, plan.tank, &resource, plan.amount))
+        })
+        .ok()
+        .unwrap_or(0);
+    if taken == 0 {
+        return;
+    }
+    // The engine is the truth about what actually left the tank, and the fluid it
+    // named is the truth about which fluid did.
+    commit_fluid_import(
+        fluids,
+        &FluidImport {
+            tank: plan.tank,
+            fluid: id,
+            amount: taken,
+        },
+    );
+}
+
+/// One fluid exporter's move this tick: up to [`FLUID_RATE`] millibuckets from
+/// the fluid channel into the tank on its face. What the destination refuses
+/// stays in the channel (a cauldron takes whole levels).
+fn export_fluid_once(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    cable: [i32; 3],
+    face: usize,
+    fluids: &mut Fluids,
+) {
+    let Some(plan) = plan_fluid_export(fluids, FLUID_RATE) else {
+        return;
+    };
+    let Some(key) = host.fluid_key(&plan.fluid) else {
+        return;
+    };
+    let stack = FluidStack::new(key, 1);
+    let resource = FluidResource::of(&stack);
+    let Some(container) = fluid_container(host, level, cable, face) else {
+        return;
+    };
+    let inserted = host
+        .transaction(|host, tx| Ok::<_, ()>(container.insert_any(host, tx, &resource, plan.amount)))
+        .ok()
+        .unwrap_or(0);
+    commit_fluid_export(fluids, &plan, inserted);
+}
+
 /// Run every queued cable network's transfers at the end of the level's tick.
 /// Every importer takes from the inventory on its face into the network's store,
 /// then every exporter hands the store on, so items imported this tick can leave
@@ -337,13 +514,25 @@ pub(crate) fn run_networks(host: &mut dyn ServerHost, level: LevelRef, queued: B
     let Some(cable) = cable_key(host) else {
         return;
     };
-    let mut done: BTreeSet<[i32; 3]> = BTreeSet::new();
+    // One shared traversal budget for the level tick, and one `seen` set: a cable is
+    // walked once even when every cable of its network queued itself, so a part
+    // cannot transfer twice in a tick. A component the budget cannot hold is
+    // refused whole (nothing of it moves) instead of being cut into overlapping
+    // pieces; the remaining queued starts are refused too, consistently.
+    let mut seen: BTreeSet<[i32; 3]> = BTreeSet::new();
+    let mut budget = MAX_NETWORK;
     for start in queued {
-        if done.contains(&start) || !is_cable(host, cable, level, start) {
+        if seen.contains(&start) || !is_cable(host, cable, level, start) {
             continue;
         }
-        let network = collect_network(start, |pos| is_cable(host, cable, level, pos), MAX_NETWORK);
-        done.extend(network.iter().copied());
+        let Some(network) = walk_component(
+            start,
+            |pos| is_cable(host, cable, level, pos),
+            &mut seen,
+            &mut budget,
+        ) else {
+            break;
+        };
         let Some(store_pos) = root(&network) else {
             continue;
         };
@@ -352,12 +541,16 @@ pub(crate) fn run_networks(host: &mut dyn ServerHost, level: LevelRef, queued: B
         // (an unloaded chunk, a replaced block entity) therefore moves nothing.
         let pass = host.transaction(|host, _tx| {
             let mut store = store_at(host, level, store_pos);
+            let mut fluids = fluid_store_at(host, level, store_pos);
             for &pos in &network {
                 let Some(parts) = parts_at(host, cable, level, pos) else {
                     continue;
                 };
                 for face in parts.faces(Part::ImporterItem) {
                     import_once(host, level, pos, face, &mut store);
+                }
+                for face in parts.faces(Part::ImporterFluid) {
+                    import_fluid_once(host, level, pos, face, &mut fluids);
                 }
             }
             for &pos in &network {
@@ -367,23 +560,29 @@ pub(crate) fn run_networks(host: &mut dyn ServerHost, level: LevelRef, queued: B
                 for face in parts.faces(Part::ExporterItem) {
                     export_once(host, level, pos, face, &mut store);
                 }
+                for face in parts.faces(Part::ExporterFluid) {
+                    export_fluid_once(host, level, pos, face, &mut fluids);
+                }
             }
-            match set_store(host, level, store_pos, &store) {
-                true => Ok(store),
+            match set_stores(host, level, store_pos, &store, &fluids) {
+                true => Ok((store, fluids)),
                 false => Err(()),
             }
         });
-        // An aborted pass moved nothing, so the store it left on disk is the one the
-        // status has to describe.
-        let store = match pass {
-            Ok(store) => store,
-            Err(()) => store_at(host, level, store_pos),
+        // An aborted pass moved nothing, so the stores it left on disk are the ones
+        // the status has to describe.
+        let (store, fluids) = match pass {
+            Ok(stores) => stores,
+            Err(()) => (
+                store_at(host, level, store_pos),
+                fluid_store_at(host, level, store_pos),
+            ),
         };
         for &pos in &network {
             let Some(parts) = parts_at(host, cable, level, pos) else {
                 continue;
             };
-            show_status(host, level, pos, parts, &store);
+            show_status(host, level, pos, parts, &store, &fluids);
         }
     }
 }
@@ -429,6 +628,8 @@ pub(crate) fn place_part_from_item(
     let part = match held.item().id(host).as_str() {
         IMPORTER => Part::ImporterItem,
         EXPORTER => Part::ExporterItem,
+        IMPORTER_FLUID => Part::ImporterFluid,
+        EXPORTER_FLUID => Part::ExporterFluid,
         _ => return Placement::NotMine,
     };
     let property = face_property(face);
@@ -450,7 +651,7 @@ pub(crate) fn place_part_from_item(
 }
 
 /// The parts of a cable as `down=none,north=importer_item`.
-fn parts_line(parts: Parts) -> String {
+fn parts_line(parts: PartSet) -> String {
     (0..FACE_COUNT)
         .map(|face| {
             format!(
@@ -499,7 +700,10 @@ pub(crate) fn info(host: &mut dyn ServerHost, command: &CommandInvocation) {
     let store = root(&network)
         .map(|store_pos| store_at(host, level, store_pos))
         .unwrap_or_default();
-    let status = status_for(parts, &store);
+    let fluids = root(&network)
+        .map(|store_pos| fluid_store_at(host, level, store_pos))
+        .unwrap_or_default();
+    let status = status_for(parts, &store, &fluids);
     feedback(
         host,
         &format!(
@@ -509,6 +713,16 @@ pub(crate) fn info(host: &mut dyn ServerHost, command: &CommandInvocation) {
             pos[2],
             describe_store(&store),
             status.name()
+        ),
+    );
+    feedback(
+        host,
+        &format!(
+            "Tunnel Cable at {},{},{}: fluids {}",
+            pos[0],
+            pos[1],
+            pos[2],
+            describe_fluids(&fluids)
         ),
     );
 }
@@ -523,7 +737,7 @@ pub(crate) fn set_part(host: &mut dyn ServerHost, command: &CommandInvocation) {
     let Some(pos) = command_pos(command) else {
         feedback(
             host,
-            "Usage: /integratedtunnels part <x> <y> <z> <face> <none|importer_item|exporter_item>",
+            "Usage: /integratedtunnels part <x> <y> <z> <face> <none|importer_item|exporter_item|importer_fluid|exporter_fluid>",
         );
         return;
     };
@@ -552,7 +766,7 @@ pub(crate) fn set_part(host: &mut dyn ServerHost, command: &CommandInvocation) {
         feedback(
             host,
             &format!(
-                "Integrated Tunnels: unknown part '{wanted}' (none|importer_item|exporter_item)"
+                "Integrated Tunnels: unknown part '{wanted}' (none|importer_item|exporter_item|importer_fluid|exporter_fluid)"
             ),
         );
         return;
@@ -579,6 +793,58 @@ pub(crate) fn set_part(host: &mut dyn ServerHost, command: &CommandInvocation) {
             FACE_NAMES[face]
         ),
     );
+}
+
+/// The two usages and the level each is registered at. `part` changes a cable at
+/// coordinates and consumes no part item, so it is a gamemaster tool (level 2), as
+/// `/data` is; `info` is a readout.
+pub(crate) fn usages() -> [(&'static str, u8); 2] {
+    [
+        ("integratedtunnels info <pos:block_pos>", 0),
+        (
+            "integratedtunnels part <pos:block_pos> <face:word> <part:word>",
+            2,
+        ),
+    ]
+}
+
+/// Walk one connected component of cables from `start`, spending a **shared**
+/// per-tick `budget` and recording every visited position in `seen`. `None` when
+/// the budget runs out: the component is bigger than a level tick may walk, so it
+/// is refused as a whole (the caller moves nothing of it) rather than processed in
+/// overlapping pieces that would repeat its transfers.
+fn walk_component(
+    start: [i32; 3],
+    is_cable: impl Fn([i32; 3]) -> bool,
+    seen: &mut BTreeSet<[i32; 3]>,
+    budget: &mut usize,
+) -> Option<Vec<[i32; 3]>> {
+    let mut component = Vec::new();
+    let mut queue = vec![start];
+    while let Some(pos) = queue.pop() {
+        if !seen.insert(pos) {
+            continue;
+        }
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        component.push(pos);
+        for next in crate::runtime::neighbours(pos) {
+            if !seen.contains(&next) && is_cable(next) {
+                queue.push(next);
+            }
+        }
+    }
+    Some(component)
+}
+
+/// Whether the network store can round-trip a stack. The store saves an item id
+/// and a count (`store_tag`), so a component-bearing stack (a filled shulker, an
+/// enchanted book) or a damaged one would come back as a fresh item; the importer
+/// leaves those in their container instead of destroying their state.
+fn round_trips(has_components: bool, damage: u32) -> bool {
+    !has_components && damage == 0
 }
 
 /// The `pos` argument of a command as a block position.
@@ -626,4 +892,66 @@ pub(crate) fn taken_face_line(face: usize) -> String {
         "Integrated Tunnels: this cable face already holds a part ({})",
         FACE_NAMES[face]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A straight line of `len` cables along +x at y=0, z=0.
+    fn line(len: i32) -> impl Fn([i32; 3]) -> bool {
+        move |pos| pos[1] == 0 && pos[2] == 0 && (0..len).contains(&pos[0])
+    }
+
+    #[test]
+    fn the_part_command_is_operator_only_and_the_readout_is_not() {
+        let usages = usages();
+        assert_eq!(usages[0].1, 0, "info is a readout");
+        assert_eq!(
+            usages[1].1, 2,
+            "part rewrites another player's cable at coordinates: it must be level 2"
+        );
+        assert!(usages[1].0.contains(" part "));
+    }
+
+    #[test]
+    fn a_component_that_fits_is_walked_once() {
+        let mut seen = BTreeSet::new();
+        let mut budget = 8;
+        let component = walk_component([0, 0, 0], line(5), &mut seen, &mut budget)
+            .expect("five cables fit in eight");
+        assert_eq!(component.len(), 5);
+        assert_eq!(budget, 3);
+        // The other cables of the same network were visited by that walk, so a
+        // queued start inside it does not walk (or transfer) them again.
+        let again = walk_component([3, 0, 0], line(5), &mut seen, &mut budget)
+            .expect("an already-seen start costs nothing");
+        assert!(again.is_empty(), "got {again:?}");
+        assert_eq!(budget, 3);
+    }
+
+    #[test]
+    fn a_component_larger_than_the_shared_budget_is_refused_whole() {
+        let mut seen = BTreeSet::new();
+        let mut budget = 4;
+        assert_eq!(
+            walk_component([0, 0, 0], line(20), &mut seen, &mut budget),
+            None,
+            "a component over the budget must be refused, not processed in pieces"
+        );
+        assert_eq!(
+            budget, 0,
+            "the budget is spent, so the rest of the tick stops"
+        );
+    }
+
+    #[test]
+    fn a_stack_with_state_is_left_out_of_the_store() {
+        assert!(round_trips(false, 0), "a plain item round-trips");
+        assert!(
+            !round_trips(true, 0),
+            "a filled shulker must not be flattened"
+        );
+        assert!(!round_trips(false, 3), "a worn tool must keep its damage");
+    }
 }

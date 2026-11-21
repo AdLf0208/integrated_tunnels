@@ -159,8 +159,38 @@ Written here because the jar does not contain them:
   part cannot live on that block's state. The carrier is the port's own
   stand-in for the Integrated Dynamics cable; a cable recipe is not carried.
 
-Not carried (gaps, recorded in `notes.md`): fluid/energy/world parts, the
-interface parts, the player simulator, filters, the variable-card/aspect layer,
-the part screens, network energy, the multipart BE renderer, the two part
-recipes (their ingredients are Integrated Dynamics content the parent port does
+Not carried (gaps, recorded in `notes.md`): energy/world parts, the interface
+parts, the player simulator, filters, the variable-card/aspect layer, the part
+screens, network energy, item NBT fidelity in the store, the multipart BE
+renderer, the part recipes (their ingredients are content the parent port does
 not carry), advancements, and the `tunnels_tutorials`/`tunnels_info` info book.
+
+## 4. Slice 2: the fluid parts (measured 2026-11-21)
+
+Read from the same jar and from tag `1.21.1-1.13.0` (`dd9ade64e31b`; the clone
+was re-made for this slice and deleted after these facts were recorded):
+
+- **Items and shapes.** `part_importer_fluid`/`part_exporter_fluid` exist as
+  item models and six `facing × status=active|inactive|error` blockstate
+  variants each, exactly like the item parts: the connector's 6×6×4 box with
+  the jar's rotations. The four textures are `part/importer_fluid_active|
+  inactive` and `part/exporter_fluid_active|inactive` (260/260/233/226 B).
+- **Rate.** `TunnelAspectWriteBuilders.Fluid.PROPERTIES_RATE` defaults
+  `PROP_RATE` to **1000** (mB), channel 0, round-robin off, passive IO true,
+  `PROP_CHECK_AMOUNT` false; the default aspects are `Write.Fluid.
+  BOOLEAN_IMPORT`/`BOOLEAN_EXPORT`, each moving through
+  `TunnelHelpers.moveSingleStateOptimized` once per part tick.
+- **Channel.** Upstream's fluid channel is the same slotless
+  `IPositionedAddonsNetworkIngredients` store as the item channel, keyed by
+  fluid; the part's target is the block on its face
+  (`TunnelFluidHelpers.matchAll(rate, exact)`).
+- **Energy.** `GeneralConfig.importerFluidBaseConsumption` /
+  `exporterFluidBaseConsumption` default **1** per tick — a gap, as for the item
+  parts.
+- **Recipes.** `part_importer_fluid` = `part_interface_fluid` +
+  `integrateddynamics:variable_transformer_input`; the exporter uses
+  `…_output`. Neither ingredient is content this pack carries, so the recipes
+  stay a gap (the same reason as the item parts).
+- **The test tank.** At `0a875da` the game's fluid capability answers for a
+  cauldron as one tank holding whole levels (333/667/1000 mB for water), which
+  is what makes the fluid family provable in game without another mod.

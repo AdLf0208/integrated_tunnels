@@ -25,6 +25,11 @@ pub const FACE_NAMES: [&str; FACE_COUNT] = ["down", "up", "north", "south", "wes
 /// default for `PROP_RATE` (`TunnelAspectWriteBuilders.java`, "64").
 pub const ITEM_RATE: u32 = 64;
 
+/// The millibuckets one fluid part moves in one tick: upstream's fluid
+/// `PROPERTIES_RATE` default for `PROP_RATE`
+/// (`TunnelAspectWriteBuilders.java`, "1000").
+pub const FLUID_RATE: u32 = 1000;
+
 /// How many stacks [`describe_store`] names before it stops listing with `…`.
 const NAMED_STACKS: usize = 8;
 
@@ -39,6 +44,10 @@ pub enum Part {
     ImporterItem,
     /// An Item Exporter: pushes the store into the inventory behind its face.
     ExporterItem,
+    /// A Fluid Importer: pulls from the tank behind its face into the fluid channel.
+    ImporterFluid,
+    /// A Fluid Exporter: pushes the fluid channel into the tank behind its face.
+    ExporterFluid,
 }
 
 impl Part {
@@ -48,6 +57,8 @@ impl Part {
             "none" => Some(Part::None),
             "importer_item" => Some(Part::ImporterItem),
             "exporter_item" => Some(Part::ExporterItem),
+            "importer_fluid" => Some(Part::ImporterFluid),
+            "exporter_fluid" => Some(Part::ExporterFluid),
             _ => None,
         }
     }
@@ -58,18 +69,30 @@ impl Part {
             Part::None => "none",
             Part::ImporterItem => "importer_item",
             Part::ExporterItem => "exporter_item",
+            Part::ImporterFluid => "importer_fluid",
+            Part::ExporterFluid => "exporter_fluid",
         }
+    }
+
+    /// Whether this part moves items (as opposed to fluids).
+    pub fn is_item(self) -> bool {
+        matches!(self, Part::ImporterItem | Part::ExporterItem)
+    }
+
+    /// Whether this part moves fluids.
+    pub fn is_fluid(self) -> bool {
+        matches!(self, Part::ImporterFluid | Part::ExporterFluid)
     }
 }
 
 /// The six part slots of one cable, in [`FACE_NAMES`] order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Parts([Part; FACE_COUNT]);
+pub struct PartSet([Part; FACE_COUNT]);
 
-impl Parts {
+impl PartSet {
     /// No parts on any face.
-    pub fn new() -> Parts {
-        Parts::default()
+    pub fn new() -> PartSet {
+        PartSet::default()
     }
 
     /// The part on `face`, or `None` for an out-of-range face.
@@ -78,12 +101,12 @@ impl Parts {
     }
 
     /// The same cable with `part` on `face` (out-of-range faces are ignored).
-    pub fn with(self, face: usize, part: Part) -> Parts {
+    pub fn with(self, face: usize, part: Part) -> PartSet {
         let mut slots = self.0;
         if let Some(slot) = slots.get_mut(face) {
             *slot = part;
         }
-        Parts(slots)
+        PartSet(slots)
     }
 
     /// Whether any face carries any part.
@@ -326,14 +349,176 @@ pub fn commit_export(store: &mut Store, moved: &ExportMove, inserted: u32) -> u3
     store.remove(&moved.item, inserted.min(moved.count))
 }
 
-/// A cable's part status: active while it carries a part and the network holds
-/// items to move, as upstream's part is active while its aspect has work.
-pub fn status_for(parts: Parts, store: &Store) -> Status {
-    if parts.has_part() && !store.is_empty() {
+/// A tank of the fluid handler behind a part's face, as the engine reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TankView {
+    /// The tank's number, for the engine's extract helper.
+    pub tank: usize,
+    /// The fluid in it.
+    pub fluid: String,
+    /// How many millibuckets.
+    pub amount: u32,
+}
+
+/// The fluid move one importer makes this tick.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FluidImport {
+    /// The tank's number, for the engine's extract helper.
+    pub tank: usize,
+    pub fluid: String,
+    pub amount: u32,
+}
+
+/// The fluid move one exporter makes this tick.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FluidExport {
+    pub fluid: String,
+    pub amount: u32,
+}
+
+/// One stored fluid: an id and how many millibuckets of it the network holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FluidEntry {
+    pub fluid: String,
+    pub amount: u32,
+}
+
+/// A network's slotless fluid channel (upstream's fluid
+/// `IPositionedAddonsNetworkIngredients` channel): one entry per fluid id, in the
+/// order the fluids first arrived, beside the item [`Store`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Fluids {
+    entries: Vec<FluidEntry>,
+}
+
+impl Fluids {
+    /// An empty channel.
+    pub fn new() -> Fluids {
+        Fluids::default()
+    }
+
+    /// The stored fluids, in the order they first arrived.
+    pub fn entries(&self) -> &[FluidEntry] {
+        &self.entries
+    }
+
+    /// How many millibuckets the channel holds in total.
+    pub fn total(&self) -> u32 {
+        self.entries.iter().map(|entry| entry.amount).sum()
+    }
+
+    /// Whether the channel holds nothing.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Adds `amount` millibuckets of `fluid`, merging into the entry that fluid
+    /// already has (its place in the order stays); answers the fluid's new total.
+    pub fn add(&mut self, fluid: &str, amount: u32) -> u32 {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.fluid == fluid) {
+            entry.amount = entry.amount.saturating_add(amount);
+            return entry.amount;
+        }
+        self.entries.push(FluidEntry {
+            fluid: fluid.to_owned(),
+            amount,
+        });
+        amount
+    }
+
+    /// Removes up to `amount` millibuckets of `fluid`; answers how many were
+    /// removed. An entry that reaches zero is dropped.
+    pub fn remove(&mut self, fluid: &str, amount: u32) -> u32 {
+        let Some(index) = self.entries.iter().position(|entry| entry.fluid == fluid) else {
+            return 0;
+        };
+        let taken = amount.min(self.entries[index].amount);
+        self.entries[index].amount -= taken;
+        if self.entries[index].amount == 0 {
+            self.entries.remove(index);
+        }
+        taken
+    }
+}
+
+/// What a fluid importer takes this tick: the first tank holding fluid, up to
+/// `rate` millibuckets (upstream's `PROPERTIES_RATE` has no slot property, so the
+/// first non-empty tank is the one its handler names).
+pub fn plan_fluid_import(tanks: &[TankView], rate: u32) -> Option<FluidImport> {
+    if rate == 0 {
+        return None;
+    }
+    let tank = tanks.iter().find(|tank| tank.amount > 0)?;
+    Some(FluidImport {
+        tank: tank.tank,
+        fluid: tank.fluid.clone(),
+        amount: tank.amount.min(rate),
+    })
+}
+
+/// Records fluid the engine actually took from the tank; answers the channel's
+/// total for that fluid.
+pub fn commit_fluid_import(fluids: &mut Fluids, moved: &FluidImport) -> u32 {
+    fluids.add(&moved.fluid, moved.amount)
+}
+
+/// What a fluid exporter pushes this tick: the channel's first fluid, up to
+/// `rate` millibuckets.
+pub fn plan_fluid_export(fluids: &Fluids, rate: u32) -> Option<FluidExport> {
+    if rate == 0 {
+        return None;
+    }
+    let entry = fluids.entries().first()?;
+    Some(FluidExport {
+        fluid: entry.fluid.clone(),
+        amount: entry.amount.min(rate),
+    })
+}
+
+/// Records what the destination accepted; answers how many millibuckets left the
+/// channel.
+pub fn commit_fluid_export(fluids: &mut Fluids, moved: &FluidExport, inserted: u32) -> u32 {
+    fluids.remove(&moved.fluid, inserted.min(moved.amount))
+}
+
+/// A cable's part status, as upstream's `PartStateWriterBase` reports it: active
+/// while a part of the cable has work on its own channel — an item part while the
+/// network holds items, a fluid part while it holds fluid.
+pub fn status_for(parts: PartSet, items: &Store, fluids: &Fluids) -> Status {
+    let item_part = parts.faces(Part::ImporterItem).next().is_some()
+        || parts.faces(Part::ExporterItem).next().is_some();
+    let fluid_part = parts.faces(Part::ImporterFluid).next().is_some()
+        || parts.faces(Part::ExporterFluid).next().is_some();
+    let item_work = item_part && !items.is_empty();
+    let fluid_work = fluid_part && !fluids.is_empty();
+    if item_work || fluid_work {
         Status::Active
     } else {
         Status::Inactive
     }
+}
+
+/// The fluid channel as the `/integratedtunnels info` readout prints it, e.g.
+/// `2 stacks, 1500 mB (minecraft:water x1000 mB, minecraft:lava x500 mB)`;
+/// at most eight fluids are named, then `, …`.
+pub fn describe_fluids(fluids: &Fluids) -> String {
+    let stacks = fluids.entries().len();
+    if stacks == 0 {
+        return "0 mB".to_owned();
+    }
+    let named = fluids
+        .entries()
+        .iter()
+        .take(NAMED_STACKS)
+        .map(|entry| format!("{} x{} mB", entry.fluid, entry.amount))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = if stacks > NAMED_STACKS { ", …" } else { "" };
+    let stack_word = if stacks == 1 { "stack" } else { "stacks" };
+    format!(
+        "{stacks} {stack_word}, {} mB ({named}{more})",
+        fluids.total()
+    )
 }
 
 /// The store as the `/integratedtunnels info` readout prints it, e.g.
@@ -374,14 +559,14 @@ mod tests {
 
     #[test]
     fn a_part_is_placed_on_one_face_only() {
-        let parts = Parts::new()
+        let parts = PartSet::new()
             .with(5, Part::ImporterItem)
             .with(3, Part::ExporterItem);
         assert_eq!(parts.get(5), Some(Part::ImporterItem));
         assert_eq!(parts.get(3), Some(Part::ExporterItem));
         assert_eq!(parts.get(0), Some(Part::None));
         assert!(parts.has_part());
-        assert!(!Parts::new().has_part());
+        assert!(!PartSet::new().has_part());
         // Replacing a face keeps the others; out-of-range faces do nothing.
         let replaced = parts.with(5, Part::None);
         assert_eq!(replaced.get(5), Some(Part::None));
@@ -392,7 +577,7 @@ mod tests {
 
     #[test]
     fn each_part_kind_lists_its_faces_in_face_order() {
-        let parts = Parts::new()
+        let parts = PartSet::new()
             .with(5, Part::ImporterItem)
             .with(1, Part::ExporterItem)
             .with(2, Part::ImporterItem);
@@ -401,8 +586,8 @@ mod tests {
             vec![2, 5]
         );
         assert_eq!(parts.faces(Part::ExporterItem).collect::<Vec<_>>(), vec![1]);
-        assert_eq!(Parts::new().faces(Part::None).count(), FACE_COUNT);
-        assert_eq!(Parts::new().faces(Part::ImporterItem).next(), None);
+        assert_eq!(PartSet::new().faces(Part::None).count(), FACE_COUNT);
+        assert_eq!(PartSet::new().faces(Part::ImporterItem).next(), None);
     }
 
     #[test]
@@ -628,14 +813,176 @@ mod tests {
     #[test]
     fn the_status_follows_the_parts_and_the_store() {
         let mut store = Store::new();
-        let parts = Parts::new().with(2, Part::ImporterItem);
-        assert_eq!(status_for(parts, &store), Status::Inactive);
+        let empty_fluids = Fluids::new();
+        let parts = PartSet::new().with(2, Part::ImporterItem);
+        assert_eq!(status_for(parts, &store, &empty_fluids), Status::Inactive);
         store.add("minecraft:cobblestone", 1);
-        assert_eq!(status_for(parts, &store), Status::Active);
+        assert_eq!(status_for(parts, &store, &empty_fluids), Status::Active);
         // A cable with no part is never active, however full the network is.
-        assert_eq!(status_for(Parts::new(), &store), Status::Inactive);
+        assert_eq!(
+            status_for(PartSet::new(), &store, &empty_fluids),
+            Status::Inactive
+        );
         assert_eq!(Status::Active.name(), "active");
         assert_eq!(Status::Inactive.name(), "inactive");
+    }
+
+    #[test]
+    fn fluid_part_names_round_trip() {
+        for part in [
+            Part::ImporterFluid,
+            Part::ExporterFluid,
+            Part::ImporterItem,
+            Part::None,
+        ] {
+            assert_eq!(Part::from_name(part.name()), Some(part));
+        }
+        assert_eq!(Part::ImporterFluid.name(), "importer_fluid");
+        assert_eq!(Part::ExporterFluid.name(), "exporter_fluid");
+        // Another mod's part value is still not ours.
+        assert_eq!(Part::from_name("interface_fluid"), None);
+    }
+
+    #[test]
+    fn an_importer_takes_the_first_tank_up_to_its_rate() {
+        let tanks = vec![
+            TankView {
+                tank: 0,
+                fluid: "minecraft:lava".to_owned(),
+                amount: 0,
+            },
+            TankView {
+                tank: 1,
+                fluid: "minecraft:water".to_owned(),
+                amount: 4000,
+            },
+        ];
+        assert_eq!(
+            plan_fluid_import(&tanks, FLUID_RATE),
+            Some(FluidImport {
+                tank: 1,
+                fluid: "minecraft:water".to_owned(),
+                amount: 1000,
+            })
+        );
+        // A tank holding less than the rate moves what it holds.
+        let small = vec![TankView {
+            tank: 0,
+            fluid: "minecraft:lava".to_owned(),
+            amount: 500,
+        }];
+        assert_eq!(
+            plan_fluid_import(&small, FLUID_RATE).map(|m| m.amount),
+            Some(500)
+        );
+        // An empty network of tanks moves nothing.
+        assert_eq!(plan_fluid_import(&[], FLUID_RATE), None);
+        assert_eq!(plan_fluid_import(&tanks[..1], FLUID_RATE), None);
+    }
+
+    #[test]
+    fn a_committed_fluid_import_lands_in_the_channel() {
+        let mut fluids = Fluids::new();
+        let moved = FluidImport {
+            tank: 0,
+            fluid: "minecraft:water".to_owned(),
+            amount: 1000,
+        };
+        assert_eq!(commit_fluid_import(&mut fluids, &moved), 1000);
+        assert_eq!(fluids.total(), 1000);
+        assert_eq!(commit_fluid_import(&mut fluids, &moved), 2000);
+        assert_eq!(fluids.entries().len(), 1);
+        // A different fluid is its own entry, after the first.
+        let lava = FluidImport {
+            tank: 1,
+            fluid: "minecraft:lava".to_owned(),
+            amount: 500,
+        };
+        commit_fluid_import(&mut fluids, &lava);
+        assert_eq!(fluids.entries()[1].fluid, "minecraft:lava");
+        assert_eq!(fluids.total(), 2500);
+    }
+
+    #[test]
+    fn an_exporter_pushes_the_first_fluid_up_to_its_rate() {
+        let mut fluids = Fluids::new();
+        assert_eq!(plan_fluid_export(&fluids, FLUID_RATE), None);
+        fluids.add("minecraft:water", 1500);
+        fluids.add("minecraft:lava", 500);
+        assert_eq!(
+            plan_fluid_export(&fluids, FLUID_RATE),
+            Some(FluidExport {
+                fluid: "minecraft:water".to_owned(),
+                amount: 1000,
+            })
+        );
+        fluids.remove("minecraft:water", 1500);
+        assert_eq!(
+            plan_fluid_export(&fluids, FLUID_RATE).map(|m| (m.fluid, m.amount)),
+            Some(("minecraft:lava".to_owned(), 500))
+        );
+    }
+
+    #[test]
+    fn a_committed_fluid_export_takes_only_what_the_tank_accepted() {
+        let mut fluids = Fluids::new();
+        fluids.add("minecraft:water", 1000);
+        let moved = FluidExport {
+            fluid: "minecraft:water".to_owned(),
+            amount: 1000,
+        };
+        // A cauldron takes whole levels: the first third only.
+        assert_eq!(commit_fluid_export(&mut fluids, &moved, 333), 333);
+        assert_eq!(fluids.total(), 667);
+        assert_eq!(commit_fluid_export(&mut fluids, &moved, 0), 0);
+        assert_eq!(fluids.total(), 667);
+        assert_eq!(fluids.entries()[0].amount, 667);
+    }
+
+    #[test]
+    fn the_status_is_active_on_either_channel() {
+        let items = Store::new();
+        let mut fluids = Fluids::new();
+        let parts = PartSet::new().with(4, Part::ImporterFluid);
+        assert_eq!(status_for(parts, &items, &fluids), Status::Inactive);
+        fluids.add("minecraft:water", 1000);
+        assert_eq!(status_for(parts, &items, &fluids), Status::Active);
+        // A fluid part with only items in the network is not its work, and an
+        // item part with only fluids is not its work either: each channel's
+        // parts are active on their own channel.
+        let mut items = Store::new();
+        items.add("minecraft:cobblestone", 1);
+        assert_eq!(
+            status_for(parts, &items, &Fluids::new()),
+            Status::Inactive,
+            "a fluid part is not active on the item channel"
+        );
+        let item_parts = PartSet::new().with(4, Part::ImporterItem);
+        assert_eq!(
+            status_for(item_parts, &Store::new(), &fluids),
+            Status::Inactive,
+            "an item part is not active on the fluid channel"
+        );
+        assert_eq!(status_for(item_parts, &items, &fluids), Status::Active);
+    }
+
+    #[test]
+    fn the_fluid_line_names_each_stack() {
+        let mut fluids = Fluids::new();
+        assert_eq!(describe_fluids(&fluids), "0 mB");
+        fluids.add("minecraft:water", 1000);
+        fluids.add("minecraft:lava", 500);
+        assert_eq!(
+            describe_fluids(&fluids),
+            "2 stacks, 1500 mB (minecraft:water x1000 mB, minecraft:lava x500 mB)"
+        );
+        let mut many = Fluids::new();
+        for index in 0..10 {
+            many.add(&format!("minecraft:fluid_{index}"), 1);
+        }
+        let line = describe_fluids(&many);
+        assert!(line.starts_with("10 stacks, 10 mB (minecraft:fluid_0 x1 mB"));
+        assert!(line.ends_with(", …)"), "{line}");
     }
 
     #[test]

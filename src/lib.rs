@@ -111,10 +111,7 @@ impl Hooks for Mod {
     fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
         event
             .commands
-            .push(Command::new("integratedtunnels info <pos:block_pos>"));
-        event.commands.push(Command::new(
-            "integratedtunnels part <pos:block_pos> <face:word> <part:word>",
-        ));
+            .extend(cable::usages().map(|(usage, level)| Command::op(usage, level)));
     }
 
     /// Run the two usages [`Hooks::register_commands`] declares, after the game has

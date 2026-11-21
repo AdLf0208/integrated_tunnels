@@ -1,4 +1,4 @@
-# Integrated Tunnels → Horizon (slice 1)
+# Integrated Tunnels → Horizon (slices 1–2)
 
 Port of **Integrated Tunnels 1.13.0** (`CyclopsMC/IntegratedTunnels`, **MIT** per
 the jar's `META-INF/neoforge.mods.toml`), Minecraft 1.21.1 NeoForge, from the
@@ -104,7 +104,8 @@ the world parts will re-run this check on those paths.
 1. the **variable/aspect layer**: variable cards, the aspect selection GUI, and
    the other six item aspects (integer count, slot index, itemstack, list,
    predicate, NBT) — the whole point of the mod's "advanced" behaviour;
-2. the **fluid and energy** parts and the fluid/energy network channels;
+2. the **energy** parts and the energy network channel — the **fluid** half is
+   [slice 2](#slice-2-the-fluid-tunnel-022);
 3. the **world parts** (`importer/exporter_world_item|fluid|energy|block`) and
    the block break/place handlers (the `ExtendedFakePlayer`, the
    `dummy_pickaxe`);
@@ -324,6 +325,161 @@ project, and the e2e needs a launcher-built game. New here:
   disabled, a chunk that unloaded mid-tick) the tick's moves are rolled back instead of silently
   losing what left the source — a deliberate behaviour change from 0.1.0, which could drop the
   store; re-placing the cable gives the network a home for it again.
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-port
+
+## Review fixes (2026-11-18) — registry review #1187
+
+| Finding | Fix | Test / proof |
+|---|---|---|
+| `src/lib.rs:115` — `/integratedtunnels part` is level 0 and rewrites any loaded cable without reach or a part item | `part` is registered with `Command::op(usage, 2)`; `info` stays a level-0 readout | `cable::tests::the_part_command_is_operator_only_and_the_readout_is_not` |
+| `src/cable.rs:287` — an import saved only the item id and count, so a filled shulker (or a damaged tool) was rebuilt as a fresh stack and lost its state | the importer leaves any stack with components or damage in its container (`round_trips`); the store keeps its id+count shape, and nothing is silently flattened | `cable::tests::a_stack_with_state_is_left_out_of_the_store`; the e2e asserts a filled shulker stays in the chest while a plain stack flows |
+| `src/cable.rs:345` — a per-start cap let overlapping traversals repeat a large network's transfers | one **shared** per-tick `seen` set and budget (`walk_component`); a component that does not fit is refused whole and the rest of the tick stops, so no cable is walked or transfers twice | `cable::tests::{a_component_that_fits_is_walked_once, a_component_larger_than_the_shared_budget_is_refused_whole}` |
+
+The `Parts` type was renamed `PartSet` (a port-local type whose name collided with the SDK's
+`Parts`, which `fits` flagged as a changed item on the newest Nightly); behaviour is unchanged
+and `src/runtime.rs` is otherwise untouched.
+
+**Found while proving the leg:** the e2e still passed `--dev-mod <port>` to a game that already
+compiles the package in; removed (the flat `.hmod` is its own content). **Ladder:** 21 tests,
+clippy `-D warnings` 0, `fmt --check` clean, two builds byte-identical, `check` and `fits` exit 0;
+`launcher-game.sh run integratedtunnels` → `PASS` + `EXIT:0`, `GAME=$CONTROL_GAME` →
+`EXIT:1` (`../_shared/evidence/integratedtunnels-e2e/`).
+
+Package 0.2.1: **39,418 B**, SHA-256 `87ab0b4b23892527a1c8ba6550a7b084d3fe058384f35ce860c5427e1639bfaa`;
+a second build is byte-identical (`cmp`), `check` and `fits` exit 0.
+
+## Slice 2: the fluid tunnel (0.2.3)
+
+**Gap line** (`## Gaps (next slices)` above, item 2): *"the **fluid and energy** parts and the
+fluid/energy network channels"*. This slice takes the **fluid** half. Energy is not attemptable as a
+faithful in-game leg at this pin: the game has no vanilla FE block to feed or drain, so a transfer
+would have no failure-capable assertion (the API has the energy capability; a proof needs a mod
+tank, which this port must not add).
+
+**Why it fits the tier (`deep`).** The jar's Fluid Importer/Exporter are the same face-mounted part
+protocol as the item parts already ported (a part on a cable face, moved once per part tick), plus a
+second network channel (`FLUIDS` instead of `ITEMS`). No new engine machinery, no entity, no
+renderer.
+
+**Upstream read** (`CyclopsMC/IntegratedTunnels`, tag `1.21.1-1.13.0`, commit `dd9ade64e31b`,
+re-cloned for this slice; the clone is deleted after these findings):
+`part/PartTypeImporterFluid.java`, `part/PartTypeExporterFluid.java`,
+`part/aspect/TunnelAspects.java` (`Write.Fluid.BOOLEAN_IMPORT`/`BOOLEAN_EXPORT` are the default
+aspects), `part/aspect/TunnelAspectWriteBuilders.java` (`Fluid.PROPERTIES_RATE`: `PROP_RATE`
+default **1000 mB**, channel 0, round-robin off, passive IO true, `PROP_CHECK_AMOUNT` false),
+`core/TunnelFluidHelpers.java` (`matchAll(rate, exactAmount)`), `GeneralConfig.java`
+(`importerFluidBaseConsumption`/`exporterFluidBaseConsumption` = 1 energy/tick, a gap as for the
+item parts). Each part moves through `TunnelHelpers.moveSingleStateOptimized` once per tick, so the
+importer moves **up to 1000 mB per part per tick**.
+
+### What the slice does
+
+- **`part_importer_fluid` / `part_exporter_fluid`** — the jar's two items, models and textures
+  (`importer_fluid_active|inactive`, `exporter_fluid_active|inactive`, copied from the jar), added to
+  the cable's `part_<face>` vocabulary and to the creative tab, with the jar's lang lines.
+- **Fluid channel** — a slotless fluid store beside the item store, saved on the network's root
+  cable as a `fluids` list of `{fluid, amount}` compounds. A fluid id is the resolved registry name
+  (or the host's retained name for an unresolved fluid), so a network merges by fluid id and keeps
+  first-arrival order, as upstream's channel does.
+- **Importer** — reads the tanks of the `FLUIDS` capability behind its face, takes the first tank
+  holding fluid up to [`runtime::FLUID_RATE`] (1000 mB) with the engine's `extract`, and records what
+  the engine actually took.
+- **Exporter** — pushes the channel's first fluid up to 1000 mB with `insert_any`, and removes only
+  what the destination accepted. A cauldron takes whole levels, so a partial fill stays in the
+  channel.
+- **Status** — each channel's parts make the cable active on **their own** channel: an item part
+  while the item store holds anything, a fluid part while the fluid channel does. This is stricter
+  than 0.2.1's "any part and any items" and is what phase I asserts (a fluid-only network with 1000
+  mB shows `active`).
+- **Readout** — `/integratedtunnels info <pos>` gains a third line, `…: fluids 1 stack, 1000 mB
+  (minecraft:water x1000 mB)`; the two existing lines are unchanged, and the part command accepts
+  `none|importer_item|exporter_item|importer_fluid|exporter_fluid`.
+- **Same transaction** — the item store and the fluid channel are read once per network per tick,
+  written together, and a refused write aborts the whole pass as before.
+
+### Deliberate deviations (fluid)
+
+| Upstream | Here | Why |
+|---|---|---|
+| The fluid part asks for an `IFluidTarget` (NeoForge fluid handlers, including slotless ones) | the engine's `FLUIDS` capability through the pin's API | the pin's capability is the mod-facing fluid surface; a slotless non-tank source is not reachable |
+| The channel stores full `FluidStack`s with data components | the channel stores a fluid id and an amount (no components) | the slice has no NBT aspect; a component-carrying fluid (a potion fluid) is stored as its plain fluid — recorded gap |
+| A part consumes 1 energy/tick | no energy | no energy network in this port (unchanged gap) |
+| `status=error` for an invalid target | `inactive`/`active` only | unchanged from slice 1 |
+
+### Upstream defects fixed (fluid)
+
+**None found in this slice's path.** The boolean import/export aspect, the 1000 mB default and the
+two part recipes were read line by line: no id/tag mismatch, no unreachable recipe shape, no
+off-by-one (the rate is the predicate's amount, not a multiplier). The **recipes are not carried**:
+they need `integratedtunnels:part_interface_fluid` (the interface family, gap 4) and
+`integrateddynamics:variable_transformer_input|output`, which the parent port does not carry — the
+same reason the two item part recipes are absent.
+
+### Coverage (whole port, ruling 2026-11-20)
+
+| Family (jar) | State | Proof |
+|---|---|---|
+| Item Importer / Exporter parts | **tested** | e2e A/A2/B/C/D/E/F/G + `cable::tests` + `runtime::tests` |
+| Fluid Importer / Exporter parts | **tested** | e2e I (drain a full cauldron), J (fill an empty one), K1/K2 (each part removed stops its half), L (both items read back); `runtime::tests::*fluid*` |
+| Carrier cable block + its part items | **tested** | e2e scene, G, L, `runtime::tests::part_names_round_trip` |
+| Carrier cable self-drop loot table | **tested** | e2e M rolls `integratedtunnels:blocks/tunnel_cable` through `/loot give` and reads the cable back |
+| `/integratedtunnels info` / `part` commands | **tested** | every phase reads the parsed lines; `part` is level 2 (`cable::tests`) |
+| Varying/aspect layer (variable cards, 6 other item aspects, fluid aspects) | **not ported** | gap 1 — the parent's variable system |
+| Energy parts and channel | **not ported** | gap 2 (energy half) — no vanilla FE block to prove a transfer against |
+| World parts (import/export world item/fluid/energy/block) | **not ported** | gap 3 — needs the fake player and drill |
+| Interface parts, player simulator | **not ported** | gap 4 |
+| Part screens, part removal/drop, `error` state | **not ported** | gap 5 |
+| Network energy | **not ported** | gap 6 |
+| Sibling cable (`integrateddynamics:cable`) interop | **not ported** | gap 7 — no cross-mod API at the pin |
+| Item NBT fidelity in the store | **not ported** | gap 8 — component stacks stay in their container (e2e H asserts that) |
+| Part recipes, advancements, info book | **not ported** | gap 9 — ingredients are content the parent port does not carry |
+| Multipart block-entity renderer | **not ported** | gap 10 — parts are drawn by multipart block models |
+
+### Ladder measured for 0.2.3 (`ports/_shared/evidence/integratedtunnels/`)
+
+| Step | Result |
+|---|---|
+| RED first | `sdk-test-red-fluid.log`: `cargo test` failed to compile against the new tests — `error[E0425]: cannot find value `FLUID_RATE` in this scope`, `error[E0433]: cannot find type `Fluids` in this scope`, `error[E0599]: no variant, associated function, or constant named `ImporterFluid` …` (51 errors) |
+| Runtime tests | **28 passed**, 0 failed (`sdk-test.log`, sha + size in the log header) |
+| Lints | clippy `--all-targets -- -D warnings` exit 0, **0 warnings** (`sdk-clippy.log`) |
+| Formatting | `cargo fmt --check` clean (`sdk-fmt.log`) |
+| Package | two builds, `rm -f Cargo.lock` before each: **byte-identical**, 49,232 B, sha256 `1dbd235c13792d22c1478643cc79b1b4f09bf418144f74883125d576dc176fa9`, **46 entries**, no `Cargo.lock` (`sdk-build.log`) |
+| Registry check | `integratedtunnels 0.2.3 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 49,232 B, same sha, EXIT 0 (`sdk-check.log`) |
+| Fits the pin | `0a875da  made for`, EXIT 0 (`sdk-fits.log`) |
+| Fits another build | `0b14f8a  fits`, EXIT 0 (`sdk-fits-other.log`) |
+| Gate | `verify-sdk-package.py integratedtunnels` → **1/1** |
+| In game | `launcher-game.sh build` → `Compiling integratedtunnels (1 of 1)` (manifest bumped, trap §9d-1); `PASS` + `EXIT:0` (`evidence/integratedtunnels-e2e/e2e-launcher.log`), control (same Nightly, no package) `EXIT:1`, `SELFTEST=1` `EXIT:1`; `check-e2e-logs.py integratedtunnels-e2e --strict` → `logs=3 ok=3` |
+
+**Pin.** This slice repins `[native] horizon` from `0b14f8a` to **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`**
+(mixins unchanged at `e59da909…`). `.horizon/sdk` was **deleted** before the first build so the fetch
+is the new commit (trap §9d-17a); the build prints `SDK 0a875da` and `check` names the new pin.
+
+**Version.** The first build of this slice was 0.2.2; it shipped without the two
+`assets/integratedtunnels/items/part_{importer,exporter}_fluid.json` item definitions (and with the
+slice-1 README), so the items would have rendered as nothing even though the ids worked. 0.2.3 is the
+corrected package — those two entries (46 in all, 49,232 B) — and `check`, both `fits` runs and all
+three game legs were re-run on it. The game build was forced by the version bump, as the launcher
+reuses a build whose `horizon-mod.toml` is byte-identical (trap §9d-1), and its log confirms
+`Compiling integratedtunnels (1 of 1)`.
+
+**`src/runtime.rs` is no longer byte-identical to the retired 0.1.0 bundle**, and that is deliberate:
+slice 2's rules live in it beside slice 1's (the campaign's rule is one pure unit-tested runtime per
+port, and splitting the part vocabulary across two modules would have been worse). The tree and the
+packed copy still hash the same (`bf298bd7…dd938b`, `sdk-runtime-sha256.txt`); the retired file is
+kept at `ports/_shared/evidence/integratedtunnels/retired-hnmod-0.1.0/mixins/integratedtunnels/runtime.rs`.
+
+**Measured on the way (campaign dialect question, §9d-11/13):** the carried loot table keeps
+`"bonus_rolls": 0.0` and `"rolls": 1.0`, the two shapes `check_261_dialect.py` flags as *unverified*,
+and phase M proves 26.3 accepts them: `/loot give @s loot integratedtunnels:blocks/tunnel_cable`
+returned a tunnel cable in game. They are therefore not fatal for this family and were not rewritten
+(the checker's recipe-ingredient and loot-`conditions` shapes remain the fatal ones).
+
+**The e2e's chat readout had to become marker-based.** The chat history holds the newest 100 lines;
+the fluid phases pushed the old "count matching lines" wait past that cap, so a fresh reply could no
+longer be told from an old one (`FAIL: no /integratedtunnels info fluid reply` on the first two legs).
+`read_info`/`set_part` now bracket each command with a unique player-chat marker and read the block of
+lines immediately older than it (`tools/e2e.sh`), which is cap-independent.
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-port
 

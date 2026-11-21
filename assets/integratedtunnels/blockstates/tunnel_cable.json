@@ -240,6 +240,242 @@
         "part_east": "exporter_item",
         "status": "inactive"
       }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_importer_fluid_active",
+        "x": 270
+      },
+      "when": {
+        "part_down": "importer_fluid",
+        "status": "active"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_importer_fluid_inactive",
+        "x": 270
+      },
+      "when": {
+        "part_down": "importer_fluid",
+        "status": "inactive"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_importer_fluid_active",
+        "x": 90
+      },
+      "when": {
+        "part_up": "importer_fluid",
+        "status": "active"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_importer_fluid_inactive",
+        "x": 90
+      },
+      "when": {
+        "part_up": "importer_fluid",
+        "status": "inactive"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_importer_fluid_active",
+        "y": 180
+      },
+      "when": {
+        "part_north": "importer_fluid",
+        "status": "active"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_importer_fluid_inactive",
+        "y": 180
+      },
+      "when": {
+        "part_north": "importer_fluid",
+        "status": "inactive"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_importer_fluid_active"
+      },
+      "when": {
+        "part_south": "importer_fluid",
+        "status": "active"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_importer_fluid_inactive"
+      },
+      "when": {
+        "part_south": "importer_fluid",
+        "status": "inactive"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_importer_fluid_active",
+        "y": 90
+      },
+      "when": {
+        "part_west": "importer_fluid",
+        "status": "active"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_importer_fluid_inactive",
+        "y": 90
+      },
+      "when": {
+        "part_west": "importer_fluid",
+        "status": "inactive"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_importer_fluid_active",
+        "y": 270
+      },
+      "when": {
+        "part_east": "importer_fluid",
+        "status": "active"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_importer_fluid_inactive",
+        "y": 270
+      },
+      "when": {
+        "part_east": "importer_fluid",
+        "status": "inactive"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_exporter_fluid_active",
+        "x": 270
+      },
+      "when": {
+        "part_down": "exporter_fluid",
+        "status": "active"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_exporter_fluid_inactive",
+        "x": 270
+      },
+      "when": {
+        "part_down": "exporter_fluid",
+        "status": "inactive"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_exporter_fluid_active",
+        "x": 90
+      },
+      "when": {
+        "part_up": "exporter_fluid",
+        "status": "active"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_exporter_fluid_inactive",
+        "x": 90
+      },
+      "when": {
+        "part_up": "exporter_fluid",
+        "status": "inactive"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_exporter_fluid_active",
+        "y": 180
+      },
+      "when": {
+        "part_north": "exporter_fluid",
+        "status": "active"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_exporter_fluid_inactive",
+        "y": 180
+      },
+      "when": {
+        "part_north": "exporter_fluid",
+        "status": "inactive"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_exporter_fluid_active"
+      },
+      "when": {
+        "part_south": "exporter_fluid",
+        "status": "active"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_exporter_fluid_inactive"
+      },
+      "when": {
+        "part_south": "exporter_fluid",
+        "status": "inactive"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_exporter_fluid_active",
+        "y": 90
+      },
+      "when": {
+        "part_west": "exporter_fluid",
+        "status": "active"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_exporter_fluid_inactive",
+        "y": 90
+      },
+      "when": {
+        "part_west": "exporter_fluid",
+        "status": "inactive"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_exporter_fluid_active",
+        "y": 270
+      },
+      "when": {
+        "part_east": "exporter_fluid",
+        "status": "active"
+      }
+    },
+    {
+      "apply": {
+        "model": "integratedtunnels:block/part_exporter_fluid_inactive",
+        "y": 270
+      },
+      "when": {
+        "part_east": "exporter_fluid",
+        "status": "inactive"
+      }
     }
   ]
 }
